@@ -1,190 +1,220 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Warp Camera Android</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Pose Detection Interaction</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    
     <style>
-        body { 
-            margin: 0; 
-            overflow: hidden; 
-            background: #000; 
-            font-family: sans-serif; 
-            user-select: none;
-            -webkit-user-select: none;
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
-        #canvas { 
-            position: absolute; 
-            top: 0; 
-            left: 0; 
-            width: 100vw; 
-            height: 100vh; 
-            object-fit: cover; /* Растягивает камеру на весь экран телефона */
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: sans-serif;
         }
-        /* Интерфейс управления поверх камеры */
-        .ui-panel { 
-            position: absolute; 
-            bottom: 30px; 
-            left: 50%; 
-            transform: translateX(-50%); 
-            display: flex; 
-            gap: 15px; 
-            background: rgba(0, 0, 0, 0.6); 
-            padding: 12px 20px; 
-            border-radius: 30px; 
-            z-index: 10;
-            backdrop-filter: blur(5px);
-            align-items: center;
+        /* Скрываем исходный тег видео, так как мы рисуем всё на canvas */
+        #webcam {
+            display: none;
         }
-        .btn {
-            background: #ff3366;
+        /* Растягиваем холст на весь экран без кнопок */
+        #output_canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            /* Зеркалим изображение, чтобы движения фронтальной камеры были естественными */
+            transform: scaleX(-1); 
+        }
+        /* Небольшая подсказка при старте, исчезнет сама */
+        #info-overlay {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
             color: white;
-            border: none;
-            padding: 10px 15px;
-            font-size: 18px;
-            font-weight: bold;
-            border-radius: 50%;
-            width: 45px;
-            height: 45px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .btn:active {
-            background: #ff0044;
-            transform: scale(0.9);
-        }
-        #info {
-            color: white;
+            background: rgba(0,0,0,0.6);
+            padding: 10px 20px;
+            border-radius: 20px;
             font-size: 14px;
-            min-width: 90px;
+            pointer-events: none;
+            z-index: 10;
             text-align: center;
+            animation: fadeOut 4s forwards;
+        }
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            80% { opacity: 1; }
+            100% { opacity: 0; display: none; }
         }
     </style>
 </head>
 <body>
 
-    <canvas id="canvas"></canvas>
-
-    <div class="ui-panel">
-        <button class="btn" onclick="changeRadius(-15)">−</button>
-        <div id="info">Размер: <span id="rad-val">100</span></div>
-        <button class="btn" onclick="changeRadius(15)">+</button>
-    </div>
+    <div id="info-overlay">Поднесите руку к предмету, чтобы изменить его</div>
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="output_canvas"></canvas>
 
     <script>
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        const video = document.createElement('video');
-        
-        // Для корректной работы видео на iOS/Android
-        video.setAttribute('playsinline', '');
-        video.setAttribute('autoplay', '');
-        video.muted = true;
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
 
-        let warpX = 0, warpY = 0;
-        let radius = 100;
-        const strength = 1.7; // Сила эффекта вздутия объекта
+        // Список предметов для циклической смены
+        const items = ['🍎', '⚔️', '👑', '🪄', '🛡️', '💎', '🔥'];
+        let currentItemIndex = 0;
 
-        // Запуск камеры. facingMode: "environment" принудительно включает заднюю камеру (на чехле)
-        navigator.mediaDevices.getUserMedia({ 
-            video: { 
-                facingMode: "environment",
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-            } 
-        })
-        .then(stream => {
-            video.srcObject = stream;
-            video.play();
-        })
-        .catch(err => {
-            alert("Не удалось запустить основную камеру, включаю дефолтную.");
-            navigator.mediaDevices.getUserMedia({ video: true })
-                .then(stream => { video.srcObject = stream; video.play(); });
-        });
+        // Позиция виртуального предмета на экране (в относительных координатах от 0 до 1)
+        let itemPos = { x: 0.5, y: 0.3, radius: 0.08 }; 
+        let canChangeItem = true; // Защита от слишком быстрого переключения (дребезга)
 
-        video.addEventListener('loadedmetadata', () => {
-            // Подстраиваем внутреннее разрешение холста под видеопоток
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            warpX = canvas.width / 2;
-            warpY = canvas.height / 2;
-            requestAnimationFrame(draw);
-        });
-
-        // Функция изменения радиуса по кнопкам +/-
-        function changeRadius(amount) {
-            radius = Math.max(40, Math.min(250, radius + amount));
-            document.getElementById('rad-val').innerText = radius;
+        // Подгоняем внутреннее разрешение canvas под размеры экрана Android
+        function resizeCanvas() {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
         }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
 
-        // Отслеживание касания пальца (Touch) на Android
-        function handleTouch(e) {
-            if (e.touches.length > 0) {
-                const rect = canvas.getBoundingClientRect();
-                const touch = e.touches[0];
-                
-                // Пересчитываем координаты экрана в координаты матрицы видеокадра
-                warpX = (touch.clientX - rect.left) * (canvas.width / rect.width);
-                warpY = (touch.clientY - rect.top) * (canvas.height / rect.height);
-            }
-        }
+        // Функция обработки кадров от нейросети
+        function onResults(results) {
+            // Очищаем холст
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // 1. Рисуем зеркальный кадр из камеры
+            canvasCtx.save();
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.restore();
 
-        window.addEventListener('touchstart', handleTouch);
-        window.addEventListener('touchmove', handleTouch);
+            // Переводим радиус предмета в пиксели для отрисовки
+            const itemPixelRadius = itemPos.radius * canvasElement.width;
+            const itemX = itemPos.x * canvasElement.width;
+            const itemY = itemPos.y * canvasElement.height;
 
-        function draw() {
-            if (video.readyState === video.HAVE_CURRENT_DATA) {
-                // 1. Отрисовка кадра с камеры в реальном времени
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            // 2. Рисуем интерактивный предмет
+            canvasCtx.save();
+            // Так как canvas отзеркален через CSS (transform: scaleX(-1)), 
+            // текст (эмодзи) тоже отзеркалится. Чтобы он читался нормально, возвращаем контекст для текста обратно.
+            canvasCtx.translate(itemX, itemY);
+            canvasCtx.scale(-1, 1); 
+            canvasCtx.font = `${itemPixelRadius * 1.5}px Arial`;
+            canvasCtx.textAlign = 'center';
+            canvasCtx.textBaseline = 'middle';
+            canvasCtx.fillText(items[currentItemIndex], 0, 0);
+            canvasCtx.restore();
 
-                // 2. Вырезаем кусок изображения под пальцем для деформации
-                const size = radius * 2;
-                const sx = Math.max(0, warpX - radius);
-                const sy = Math.max(0, warpY - radius);
-                
-                if (sx + size <= canvas.width && sy + size <= canvas.height) {
-                    const imgData = ctx.getImageData(sx, sy, size, size);
-                    const origPixels = new Uint8ClampedArray(imgData.data);
-                    
-                    // 3. Алгоритм деформации пикселей
-                    for (let y = 0; y < size; y++) {
-                        for (let x = 0; x < size; x++) {
-                            const dx = x - radius;
-                            const dy = y - radius;
-                            const dist = Math.sqrt(dx*dx + dy*dy);
+            // Подсветка зоны предмета (неоновый круг)
+            canvasCtx.beginPath();
+            canvasCtx.arc(itemX, itemY, itemPixelRadius, 0, 2 * Math.PI);
+            canvasCtx.strokeStyle = 'rgba(0, 255, 255, 0.5)';
+            canvasCtx.lineWidth = 4;
+            canvasCtx.stroke();
 
-                            if (dist < radius) {
-                                const normDist = dist / radius;
-                                const warpFactor = Math.pow(normDist, strength);
-                                
-                                const srcX = Math.round(radius + dx * warpFactor);
-                                const srcY = Math.round(radius + dy * warpFactor);
+            // 3. Если скелет обнаружен, рисуем его и проверяем пересечение
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
 
-                                const targetIdx = (y * size + x) * 4;
-                                const srcIdx = (srcY * size + srcX) * 4;
+                // Индексы MediaPipe Pose: 15 - левое запястье, 16 - правое запястье
+                const leftWrist = landmarks[15];
+                const rightWrist = landmarks[16];
 
-                                // Копируем деформированный пиксель
-                                imgData.data[targetIdx] = origPixels[srcIdx];
-                                imgData.data[targetIdx+1] = origPixels[srcIdx+1];
-                                imgData.data[targetIdx+2] = origPixels[srcIdx+2];
-                            }
+                // Отрисовка суставов (простой скелет)
+                // Для примера соединим основные точки: плечи, локти, кисти
+                const connections = [
+                    [11, 12], [11, 13], [13, 15], // Левая рука
+                    [12, 14], [14, 16], // Правая рука
+                    [11, 23], [12, 24], [23, 24]  // Торс
+                ];
+
+                canvasCtx.lineWidth = 5;
+                canvasCtx.strokeStyle = '#00FF00'; // Зеленый цвет скелета
+
+                connections.forEach(([i, j]) => {
+                    if (landmarks[i] && landmarks[j]) {
+                        canvasCtx.beginPath();
+                        canvasCtx.moveTo(landmarks[i].x * canvasElement.width, landmarks[i].y * canvasElement.height);
+                        canvasCtx.lineTo(landmarks[j].x * canvasElement.width, landmarks[j].y * canvasElement.height);
+                        canvasCtx.stroke();
+                    }
+                });
+
+                // Рисуем светящиеся точки на суставах
+                landmarks.forEach(landmark => {
+                    // Рисуем только верхнюю часть тела для оптимизации (индексы < 25)
+                    if (landmark.visibility > 0.5) {
+                        canvasCtx.beginPath();
+                        canvasCtx.arc(landmark.x * canvasElement.width, landmark.y * canvasElement.height, 6, 0, 2 * Math.PI);
+                        canvasCtx.fillStyle = '#FF00FF';
+                        canvasCtx.fill();
+                    }
+                });
+
+                // 4. Логика изменения предмета при приближении руки
+                [leftWrist, rightWrist].forEach(wrist => {
+                    if (wrist && wrist.visibility > 0.5) {
+                        // Вычисляем расстояние между запястьем и предметом (в относительных координатах)
+                        const dx = wrist.x - itemPos.x;
+                        const dy = wrist.y - itemPos.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+
+                        // Если рука "коснулась" радиуса предмета
+                        if (distance < itemPos.radius && canChangeItem) {
+                            canChangeItem = false;
+                            
+                            // Меняем предмет на следующий
+                            currentItemIndex = (currentItemIndex + 1) % items.length;
+
+                            // Случайно перемещаем предмет в другую точку экрана, чтобы было интереснее играть
+                            itemPos.x = 0.2 + Math.random() * 0.6;
+                            itemPos.y = 0.2 + Math.random() * 0.4;
+
+                            // Ставим кулдаун 1 секунду, чтобы предмет не циклился мгновенно
+                            setTimeout(() => { canChangeItem = true; }, 1000);
                         }
                     }
-                    // Возвращаем измененную область обратно на экран
-                    ctx.putImageData(imgData, sx, sy);
-                }
-
-                // Рисуем аккуратный круг-индикатор вокруг области искажения
-                ctx.beginPath();
-                ctx.arc(warpX, warpY, radius, 0, 2 * Math.PI);
-                ctx.strokeStyle = 'rgba(255, 51, 102, 0.4)';
-                ctx.lineWidth = 3;
-                ctx.stroke();
+                });
             }
-            requestAnimationFrame(draw);
         }
+
+        // Настройка MediaPipe Pose
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            smoothSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        // Инициализация камеры (принудительно запрашиваем фронтальную: facingMode: 'user')
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({ image: videoElement });
+            },
+            width: 640,
+            height: 480,
+            facingMode: 'user'
+        });
+        
+        // Запуск
+        camera.start().catch(err => {
+            alert("Ошибка доступа к фронтальной камере: " + err);
+        });
     </script>
 </body>
 </html>
